@@ -1,10 +1,11 @@
-import React, { memo, useEffect, useMemo } from 'react';
+import React, { memo, useEffect, useMemo, useState } from 'react';
 import type { Node, Edge } from '@xyflow/react';
 import { ReactFlow, ReactFlowProvider, useReactFlow, Controls, Background, MiniMap, MarkerType } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import dagre from 'dagre';
 import { Layers } from 'lucide-react';
 import type { KanjiNodeData, NodeStatus } from '../types/kanji';
+import { KanjiNodeComponent } from './KanjiNode';
 
 interface Props {
   nodes: KanjiNodeData[];
@@ -151,9 +152,10 @@ const GroupNode = memo(({
     getNodeStatus: (node: KanjiNodeData) => NodeStatus;
     onSelectNode: (node: KanjiNodeData) => void;
     selected: boolean;
+    onExpand: () => void;
   };
 }) => {
-  const { group, getNodeStatus, onSelectNode, selected } = data;
+  const { group, getNodeStatus, onSelectNode, selected, onExpand } = data;
   const statuses = group.members.map(getNodeStatus);
   const mastered = statuses.filter(s => s === 'MASTERED').length;
   const available = statuses.filter(s => s === 'AVAILABLE').length;
@@ -165,12 +167,13 @@ const GroupNode = memo(({
       : 'border-slate-700';
 
   return (
-    <div className={`w-[190px] h-[155px] rounded-2xl border-2 bg-slate-950/95 p-3 ${border} ${selected ? 'ring-4 ring-cyan-300/80' : ''}`}>
+    <div onClick={onExpand} className={`w-[190px] h-[155px] cursor-pointer rounded-2xl border-2 bg-slate-950/95 p-3 ${border} ${selected ? 'ring-4 ring-cyan-300/80' : ''}`}>
       <div className="flex items-center gap-2 mb-2">
         <div className="w-10 h-10 rounded-xl bg-slate-900 border border-slate-700 flex items-center justify-center text-2xl font-serif text-cyan-200">
           {group.label.split(' ')[0]}
         </div>
         <div className="min-w-0">
+          <div className="text-[9px] uppercase tracking-wider text-cyan-400/70">Kliknij, aby rozwinąć</div>
           <div className="font-bold text-sm text-white truncate">{group.label}</div>
           <div className="text-[10px] text-slate-400 truncate">{group.description}</div>
         </div>
@@ -218,12 +221,43 @@ GroupNode.displayName = 'GroupNode';
 const nodeTypes = { kanjiGroup: GroupNode };
 
 function Inner({ nodes: kanjiNodes, selectedNodeId, getNodeStatus, onSelectNode }: Props) {
+  const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
   const { setCenter } = useReactFlow();
   const groups = useMemo(() => buildGroups(kanjiNodes), [kanjiNodes]);
   const layout = useMemo(() => makeLayout(groups, kanjiNodes), [groups, kanjiNodes]);
+  const expandedGroup = groups.find(g => g.id === expandedGroupId) ?? null;
+  const internalLayout = useMemo(() => {
+    if (!expandedGroup) return null;
+    const graph = new dagre.graphlib.Graph();
+    graph.setDefaultEdgeLabel(() => ({}));
+    graph.setGraph({ rankdir: 'TB', nodesep: 35, ranksep: 70 });
+    const ids = new Set(expandedGroup.members.map(n => n.id));
+    for (const n of expandedGroup.members) graph.setNode(n.id, { width: 110, height: 120 });
+    const edges: { id: string; source: string; target: string }[] = [];
+    for (const n of expandedGroup.members) for (const p of n.parents) {
+      if (!ids.has(p)) continue;
+      graph.setEdge(p, n.id);
+      edges.push({ id: `local-${p}-${n.id}`, source: p, target: n.id });
+    }
+    dagre.layout(graph);
+    const positions = new Map<string, { x: number; y: number }>();
+    for (const n of expandedGroup.members) {
+      const p = graph.node(n.id);
+      if (p) positions.set(n.id, { x: p.x - 55, y: p.y - 60 });
+    }
+    return { positions, edges };
+  }, [expandedGroup]);
 
   const nodes: Node[] = useMemo(
-    () => groups.map(group => ({
+    () => expandedGroup && internalLayout
+      ? expandedGroup.members.map(node => ({
+          id: node.id,
+          type: 'kanjiNode',
+          position: internalLayout.positions.get(node.id)!,
+          draggable: false,
+          data: { node, status: getNodeStatus(node), isSelected: node.id === selectedNodeId, onSelect: onSelectNode },
+        }))
+      : groups.map(group => ({
       id: group.id,
       type: 'kanjiGroup',
       position: layout.positions.get(group.id)!,
@@ -239,7 +273,15 @@ function Inner({ nodes: kanjiNodes, selectedNodeId, getNodeStatus, onSelectNode 
   );
 
   const edges: Edge[] = useMemo(
-    () => layout.edges.map(edge => {
+    () => expandedGroup && internalLayout
+      ? internalLayout.edges.map(edge => ({
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          style: { stroke: '#475569', strokeWidth: 1.8 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: '#475569', width: 14, height: 14 },
+        }))
+      : layout.edges.map(edge => {
       const source = layout.groupsById.get(edge.source)!;
       const target = layout.groupsById.get(edge.target)!;
       const sourceMastered = source.members.every(m => getNodeStatus(m) === 'MASTERED');
@@ -257,36 +299,50 @@ function Inner({ nodes: kanjiNodes, selectedNodeId, getNodeStatus, onSelectNode 
         labelBgStyle: { fill: '#0f172a', fillOpacity: 0.9 },
       };
     }),
-    [layout, getNodeStatus],
+    [layout, getNodeStatus, expandedGroup, internalLayout],
   );
 
   useEffect(() => {
     if (!selectedNodeId) return;
+    if (expandedGroup) {
+      const p = internalLayout?.positions.get(selectedNodeId);
+      if (p) setCenter(p.x + 55, p.y + 60, { zoom: 1.2, duration: 400 });
+      return;
+    }
+
     const group = groups.find(g => g.members.some(m => m.id === selectedNodeId));
     const p = group ? layout.positions.get(group.id) : undefined;
     if (p) setCenter(p.x + 95, p.y + 77.5, { zoom: 1, duration: 400 });
-  }, [selectedNodeId, groups, layout, setCenter]);
+  }, [selectedNodeId, groups, layout, expandedGroup, internalLayout, setCenter]);
 
   return (
     <div className="w-full h-full bg-rpg-bg relative overflow-hidden">
+      {expandedGroup && (
+        <button
+          onClick={() => setExpandedGroupId(null)}
+          className="absolute z-20 top-4 left-4 px-4 py-2 rounded-xl bg-slate-950/95 border border-cyan-400/60 text-cyan-200 text-sm font-semibold shadow-xl hover:bg-slate-900"
+        >
+          ← Wróć do mapy grup
+        </button>
+      )}
       <ReactFlow
         nodes={nodes}
         edges={edges}
-        nodeTypes={nodeTypes}
+        nodeTypes={expandedGroup ? { kanjiNode: KanjiNodeComponent } : nodeTypes}
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
         onlyRenderVisibleElements
         fitView
         fitViewOptions={{ padding: 0.2 }}
-        minZoom={0.2}
+        minZoom={expandedGroup ? 0.35 : 0.2}
         maxZoom={2}
         zoomOnDoubleClick={false}
         preventScrolling
       >
         <Background color="#1e293b" gap={24} size={1.5} />
         <Controls />
-        <MiniMap
+        {!expandedGroup && <MiniMap
           pannable
           zoomable
           nodeColor={n => {
@@ -299,7 +355,7 @@ function Inner({ nodes: kanjiNodes, selectedNodeId, getNodeStatus, onSelectNode 
           }}
           maskColor="rgba(9, 13, 22, 0.85)"
           className="!bg-rpg-panel !border-rpg-border !rounded-xl overflow-hidden shadow-xl hidden sm:block"
-        />
+        />}
       </ReactFlow>
     </div>
   );
