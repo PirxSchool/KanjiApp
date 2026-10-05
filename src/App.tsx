@@ -74,6 +74,7 @@ export function App() {
         {viewMode === 'TREE' ? (
           <SkillTreeGraph
             nodes={filteredNodes}
+            allNodes={nodesData}
             selectedNodeId={activeDrawerNode?.id || null}
             getNodeStatus={getNodeStatus}
             onSelectNode={handleSelectNode}

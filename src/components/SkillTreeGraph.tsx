@@ -1,14 +1,22 @@
 import React, { memo, useEffect, useMemo, useState } from 'react';
-import type { Node, Edge } from '@xyflow/react';
-import { ReactFlow, ReactFlowProvider, useReactFlow, Controls, Background, MiniMap, MarkerType } from '@xyflow/react';
+import type { Edge, Node } from '@xyflow/react';
+import {
+  Background,
+  Controls,
+  MarkerType,
+  MiniMap,
+  ReactFlow,
+  ReactFlowProvider,
+  useReactFlow,
+} from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import dagre from 'dagre';
-import { Layers } from 'lucide-react';
+import { ArrowLeft, Layers, Search, X } from 'lucide-react';
 import type { KanjiNodeData, NodeStatus } from '../types/kanji';
-import { KanjiNodeComponent } from './KanjiNode';
 
 interface Props {
   nodes: KanjiNodeData[];
+  allNodes: KanjiNodeData[];
   selectedNodeId: string | null;
   getNodeStatus: (node: KanjiNodeData) => NodeStatus;
   onSelectNode: (node: KanjiNodeData) => void;
@@ -16,201 +24,338 @@ interface Props {
 
 type KanjiGroup = {
   id: string;
+  key: string;
   label: string;
   description: string;
+  representative: string | null;
   members: KanjiNodeData[];
 };
 
-const MIN_COMPONENT_USAGE = 5;
-const MAX_SHOWN = 6;
-const MAX_EDGES_PER_GROUP = 2;
+type GroupNodeData = {
+  group: KanjiGroup;
+  getNodeStatus: (node: KanjiNodeData) => NodeStatus;
+  onSelectNode: (node: KanjiNodeData) => void;
+  onExpand: () => void;
+  selected: boolean;
+  visibleMemberIds: Set<string>;
+};
 
-function buildGroups(nodes: KanjiNodeData[]): KanjiGroup[] {
-  const byId = new Map(nodes.map(n => [n.id, n]));
+type GroupRelation = {
+  id: string;
+  source: string;
+  target: string;
+  count: number;
+};
+
+const MIN_COMPONENT_USAGE = 8;
+const GROUP_WIDTH = 230;
+const GROUP_HEIGHT = 168;
+const MAX_PREVIEW = 6;
+const MAX_INCOMING_EDGES = 2;
+const SECONDARY_EDGE_MIN_COUNT = 3;
+const SECONDARY_EDGE_RATIO = 0.5;
+
+function buildGroups(allNodes: KanjiNodeData[]) {
+  const byId = new Map(allNodes.map(node => [node.id, node]));
   const usage = new Map<string, number>();
 
-  for (const n of nodes) {
-    if (n.isRadicalOnly) continue;
-    for (const p of n.parents) if (byId.has(p)) usage.set(p, (usage.get(p) ?? 0) + 1);
-  }
-
-  const anchors = new Set(
-    [...usage.entries()].filter(([, count]) => count >= MIN_COMPONENT_USAGE).map(([id]) => id),
-  );
-
-  const keyFor = (n: KanjiNodeData) => {
-    if (n.isRadicalOnly && anchors.has(n.id)) return n.id;
-    const candidates = n.parents
-      .filter(p => anchors.has(p))
-      .sort((a, b) => (usage.get(b) ?? 0) - (usage.get(a) ?? 0));
-    return candidates[0] ?? `foundation_${n.jlpt}`;
-  };
-
-  const map = new Map<string, KanjiGroup>();
-
-  for (const n of nodes) {
-    const key = keyFor(n);
-    const anchor = byId.get(key);
-    const foundation = key.startsWith('foundation_');
-
-    if (!map.has(key)) {
-      map.set(key, {
-        id: `group_${key}`,
-        label: foundation ? `${n.jlpt} · Fundamenty` : anchor?.kanji ?? n.kanji,
-        description: foundation ? 'Podstawowe kanji' : anchor?.name ?? 'Rodzina komponentu',
-        members: [],
-      });
-    }
-    map.get(key)!.members.push(n);
-  }
-
-  // Groups with only 1–2 kanji are merged into a JLPT foundation bucket.
-  for (const [key, group] of [...map.entries()]) {
-    if (key.startsWith('foundation_') || group.members.length >= 3) continue;
-    map.delete(key);
-
-    for (const member of group.members) {
-      const foundationKey = `foundation_${member.jlpt}`;
-      const existing = map.get(foundationKey);
-      if (existing) existing.members.push(member);
-      else {
-        map.set(foundationKey, {
-          id: `group_${foundationKey}`,
-          label: `${member.jlpt} · Fundamenty`,
-          description: 'Podstawowe kanji',
-          members: [member],
-        });
+  for (const node of allNodes) {
+    if (node.isRadicalOnly) continue;
+    for (const parentId of node.parents) {
+      if (byId.has(parentId)) {
+        usage.set(parentId, (usage.get(parentId) ?? 0) + 1);
       }
     }
   }
 
-  return [...map.values()];
-}
+  const anchors = new Set(
+    [...usage.entries()]
+      .filter(([, count]) => count >= MIN_COMPONENT_USAGE)
+      .map(([id]) => id),
+  );
 
-function makeLayout(groups: KanjiGroup[], nodes: KanjiNodeData[]) {
-  const graph = new dagre.graphlib.Graph();
-  graph.setDefaultEdgeLabel(() => ({}));
-  graph.setGraph({ rankdir: 'TB', nodesep: 70, ranksep: 110 });
+  const keyFor = (node: KanjiNodeData) => {
+    if (node.isRadicalOnly && anchors.has(node.id)) return node.id;
 
-  const groupOf = new Map<string, string>();
-  const groupsById = new Map(groups.map(g => [g.id, g]));
+    const anchorParent = node.parents
+      .filter(parentId => anchors.has(parentId))
+      .sort((a, b) => (usage.get(b) ?? 0) - (usage.get(a) ?? 0))[0];
 
-  for (const group of groups) {
-    for (const member of group.members) groupOf.set(member.id, group.id);
-    graph.setNode(group.id, { width: 190, height: 155 });
+    return anchorParent ?? `foundation_${node.jlpt}`;
+  };
+
+  const rawGroups = new Map<string, KanjiNodeData[]>();
+
+  for (const node of allNodes) {
+    const key = keyFor(node);
+    const members = rawGroups.get(key) ?? [];
+    members.push(node);
+    rawGroups.set(key, members);
   }
 
-  // Many kanji edges -> one weighted group edge.
-  const relations = new Map<string, number>();
+  const groups: KanjiGroup[] = [...rawGroups.entries()].map(([key, members]) => {
+    const anchor = byId.get(key);
+    const foundation = key.startsWith('foundation_');
 
-  for (const node of nodes) {
-    const target = groupOf.get(node.id);
-    if (!target) continue;
+    const sortedMembers = [...members].sort((a, b) =>
+      a.strokeCount - b.strokeCount ||
+      a.kanji.localeCompare(b.kanji, 'ja'),
+    );
 
-    for (const parent of node.parents) {
-      const source = groupOf.get(parent);
-      if (!source || source === target) continue;
-      const key = `${source}__${target}`;
-      relations.set(key, (relations.get(key) ?? 0) + 1);
+    return {
+      id: `group_${key}`,
+      key,
+      label: foundation ? `Podstawy ${members[0].jlpt}` : `${anchor?.kanji ?? members[0].kanji} · Rodzina`,
+      description: foundation
+        ? 'Podstawowe elementy bez dominującego wspólnego komponentu.'
+        : anchor?.name ?? 'Wspólny komponent budulcowy.',
+      representative: foundation ? null : anchor?.kanji ?? null,
+      members: sortedMembers,
+    };
+  });
+
+  // Keep small component families out of the main map only when they contain a
+  // single member. The data still remains accessible through the foundation node.
+  const foundationGroups = new Map(
+    groups
+      .filter(group => group.key.startsWith('foundation_'))
+      .map(group => [group.key, group]),
+  );
+
+  const normalizedGroups = groups.filter(group => {
+    if (!group.key.startsWith('foundation_') && group.members.length === 1) {
+      const foundationKey = `foundation_${group.members[0].jlpt}`;
+      const foundation = foundationGroups.get(foundationKey);
+      if (foundation) {
+        foundation.members.push(group.members[0]);
+        foundation.members.sort((a, b) => a.strokeCount - b.strokeCount);
+        return false;
+      }
+    }
+    return true;
+  });
+
+  return normalizedGroups.map(group => ({
+    ...group,
+    members: [...group.members],
+  }));
+}
+
+function buildGroupRelations(
+  groups: KanjiGroup[],
+  allNodes: KanjiNodeData[],
+): GroupRelation[] {
+  const groupOf = new Map<string, string>();
+
+  for (const group of groups) {
+    for (const member of group.members) {
+      groupOf.set(member.id, group.id);
     }
   }
 
-  const incoming = new Map<string, { key: string; count: number }[]>();
-  for (const [key, count] of relations) {
-    const target = key.split('__')[1];
-    const list = incoming.get(target) ?? [];
-    list.push({ key, count });
-    incoming.set(target, list);
+  const relations = new Map<string, GroupRelation>();
+
+  for (const node of allNodes) {
+    const target = groupOf.get(node.id);
+    if (!target) continue;
+
+    for (const parentId of node.parents) {
+      const source = groupOf.get(parentId);
+      if (!source || source === target) continue;
+
+      const id = `ge-${source}-${target}`;
+      const current = relations.get(id);
+      relations.set(id, current
+        ? { ...current, count: current.count + 1 }
+        : { id, source, target, count: 1 });
+    }
   }
 
-  const edges: { id: string; source: string; target: string; count: number }[] = [];
+  const incoming = new Map<string, GroupRelation[]>();
+
+  for (const relation of relations.values()) {
+    const list = incoming.get(relation.target) ?? [];
+    list.push(relation);
+    incoming.set(relation.target, list);
+  }
+
+  const selected: GroupRelation[] = [];
+
   for (const list of incoming.values()) {
     list.sort((a, b) => b.count - a.count);
-    for (const item of list.slice(0, MAX_EDGES_PER_GROUP)) {
-      const [source, target] = item.key.split('__');
-      graph.setEdge(source, target);
-      edges.push({ id: `ge-${source}-${target}`, source, target, count: item.count });
+
+    const strongest = list[0];
+    if (!strongest) continue;
+    selected.push(strongest);
+
+    const secondary = list[1];
+    if (
+      secondary &&
+      selected.length &&
+      secondary.count >= SECONDARY_EDGE_MIN_COUNT &&
+      secondary.count >= strongest.count * SECONDARY_EDGE_RATIO
+    ) {
+      selected.push(secondary);
+    }
+
+    // Never show a third incoming path. The map is meant to explain the main
+    // learning route, not reproduce the complete dependency database.
+    if (selected.length > 0 && list.length > MAX_INCOMING_EDGES) {
+      // Intentionally keep only the strongest two candidates above.
+    }
+  }
+
+  // The selection above is target-local, but adding a relation twice is harmless;
+  // use a final map so each edge remains unique.
+  return [...new Map(selected.map(relation => [relation.id, relation])).values()];
+}
+
+function makeLayout(groups: KanjiGroup[], relations: GroupRelation[]) {
+  const graph = new dagre.graphlib.Graph();
+  graph.setDefaultEdgeLabel(() => ({}));
+  graph.setGraph({
+    rankdir: 'TB',
+    ranksep: 125,
+    nodesep: 75,
+    edgesep: 35,
+    marginx: 30,
+    marginy: 30,
+  });
+
+  for (const group of groups) {
+    graph.setNode(group.id, {
+      width: GROUP_WIDTH,
+      height: GROUP_HEIGHT,
+    });
+  }
+
+  const groupIds = new Set(groups.map(group => group.id));
+
+  for (const relation of relations) {
+    if (groupIds.has(relation.source) && groupIds.has(relation.target)) {
+      graph.setEdge(relation.source, relation.target, { minlen: 1 });
     }
   }
 
   dagre.layout(graph);
 
   const positions = new Map<string, { x: number; y: number }>();
+
   for (const group of groups) {
-    const p = graph.node(group.id);
-    if (p) positions.set(group.id, { x: p.x - 95, y: p.y - 77.5 });
+    const position = graph.node(group.id);
+    positions.set(group.id, {
+      x: position.x - GROUP_WIDTH / 2,
+      y: position.y - GROUP_HEIGHT / 2,
+    });
   }
 
-  return { positions, edges, groupsById };
+  return positions;
 }
 
-const GroupNode = memo(({
-  data,
-}: {
-  data: {
-    group: KanjiGroup;
-    getNodeStatus: (node: KanjiNodeData) => NodeStatus;
-    onSelectNode: (node: KanjiNodeData) => void;
-    selected: boolean;
-    onExpand: () => void;
-  };
-}) => {
-  const { group, getNodeStatus, onSelectNode, selected, onExpand } = data;
-  const statuses = group.members.map(getNodeStatus);
-  const mastered = statuses.filter(s => s === 'MASTERED').length;
-  const available = statuses.filter(s => s === 'AVAILABLE').length;
+const GroupNode = memo(({ data }: { data: GroupNodeData }) => {
+  const {
+    group,
+    getNodeStatus,
+    onSelectNode,
+    onExpand,
+    selected,
+    visibleMemberIds,
+  } = data;
 
-  const border = mastered === group.members.length
+  const statuses = group.members.map(getNodeStatus);
+  const mastered = statuses.filter(status => status === 'MASTERED').length;
+  const available = statuses.filter(status => status === 'AVAILABLE').length;
+  const visibleMembers = group.members.filter(member => visibleMemberIds.has(member.id));
+  const supportOnly = visibleMemberIds.size > 0 && visibleMembers.length === 0;
+  const previewMembers = [...visibleMembers, ...group.members.filter(member => !visibleMemberIds.has(member.id))]
+    .slice(0, MAX_PREVIEW);
+
+  const borderClass = mastered === group.members.length
     ? 'border-amber-400/80 shadow-[0_0_24px_rgba(245,158,11,0.25)]'
     : available > 0 || mastered > 0
-      ? 'border-cyan-400 shadow-[0_0_24px_rgba(6,182,212,0.25)]'
+      ? 'border-cyan-400/80 shadow-[0_0_24px_rgba(6,182,212,0.2)]'
       : 'border-slate-700';
 
   return (
-    <div onClick={onExpand} className={`w-[190px] h-[155px] cursor-pointer rounded-2xl border-2 bg-slate-950/95 p-3 ${border} ${selected ? 'ring-4 ring-cyan-300/80' : ''}`}>
-      <div className="flex items-center gap-2 mb-2">
-        <div className="w-10 h-10 rounded-xl bg-slate-900 border border-slate-700 flex items-center justify-center text-2xl font-serif text-cyan-200">
-          {group.label.split(' ')[0]}
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={event => {
+        event.stopPropagation();
+        onExpand();
+      }}
+      onKeyDown={event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onExpand();
+        }
+      }}
+      className={[
+        'w-[230px] h-[168px] box-border rounded-2xl border-2 bg-slate-950/95 p-3',
+        'cursor-pointer overflow-hidden select-none transition-all',
+        borderClass,
+        supportOnly ? 'opacity-70' : '',
+        selected ? 'ring-4 ring-cyan-300/80 ring-offset-2 ring-offset-slate-950' : '',
+      ].join(' ')}
+    >
+      <div className="flex items-start gap-2 min-w-0">
+        <div className="w-10 h-10 shrink-0 rounded-xl bg-slate-900 border border-slate-700 flex items-center justify-center text-xl font-serif text-cyan-200">
+          {group.representative ?? <Layers className="w-5 h-5 text-cyan-300" />}
         </div>
-        <div className="min-w-0">
-          <div className="text-[9px] uppercase tracking-wider text-cyan-400/70">Kliknij, aby rozwinąć</div>
-          <div className="font-bold text-sm text-white truncate">{group.label}</div>
-          <div className="text-[10px] text-slate-400 truncate">{group.description}</div>
+
+        <div className="min-w-0 flex-1 pt-0.5">
+          <div className="text-[9px] uppercase tracking-wider text-cyan-400/70 font-bold">
+            {supportOnly ? 'Wymagany komponent' : 'Grupa komponentów'}
+          </div>
+          <div className="text-sm leading-5 font-bold text-white truncate">
+            {group.label}
+          </div>
+          <div className="text-[10px] leading-4 text-slate-400 h-8 overflow-hidden">
+            {group.description}
+          </div>
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-1 mb-2">
-        {group.members.slice(0, MAX_SHOWN).map(member => {
+      <div className="grid grid-cols-6 gap-1 mt-2 mb-2">
+        {previewMembers.map(member => {
           const status = getNodeStatus(member);
+
           return (
             <button
               key={member.id}
-              title={member.name}
-              disabled={status === 'LOCKED'}
-              onClick={e => {
-                e.stopPropagation();
+              type="button"
+              title={`${member.kanji} — ${member.name}`}
+              onClick={event => {
+                event.stopPropagation();
                 onSelectNode(member);
               }}
-              className={`w-7 h-7 rounded-lg border text-base font-serif hover:scale-110 transition-transform ${
+              className={[
+                'w-7 h-7 rounded-lg border text-base font-serif',
+                'transition-transform hover:scale-110 focus:outline-none focus:ring-2 focus:ring-cyan-300',
                 status === 'MASTERED'
                   ? 'bg-amber-950 border-amber-500 text-amber-200'
                   : status === 'AVAILABLE'
                     ? 'bg-cyan-950 border-cyan-400 text-cyan-200'
-                    : 'bg-slate-900 border-slate-700 text-slate-600'
-              }`}
+                    : 'bg-slate-900 border-slate-700 text-slate-500',
+              ].join(' ')}
             >
               {member.kanji}
             </button>
           );
         })}
-        {group.members.length > MAX_SHOWN && (
-          <span className="text-[10px] text-slate-400 self-center">+{group.members.length - MAX_SHOWN}</span>
+        {group.members.length > MAX_PREVIEW && (
+          <span className="text-[9px] text-slate-400 self-center justify-self-center">
+            +{group.members.length - MAX_PREVIEW}
+          </span>
         )}
       </div>
 
-      <div className="flex items-center justify-between text-[10px] text-slate-400 border-t border-slate-800 pt-1.5">
-        <span className="flex items-center gap-1"><Layers className="w-3 h-3" /> {group.members.length} kanji</span>
-        <span>{mastered}/{group.members.length} ✓</span>
+      <div className="flex items-center justify-between gap-2 border-t border-slate-800 pt-1.5 text-[10px] text-slate-400">
+        <span className="flex items-center gap-1 min-w-0">
+          <Layers className="w-3 h-3 shrink-0" />
+          <span className="truncate">{group.members.length} kanji</span>
+        </span>
+        <span className="shrink-0">{mastered}/{group.members.length} ✓</span>
       </div>
     </div>
   );
@@ -220,147 +365,421 @@ GroupNode.displayName = 'GroupNode';
 
 const nodeTypes = { kanjiGroup: GroupNode };
 
-function Inner({ nodes: kanjiNodes, selectedNodeId, getNodeStatus, onSelectNode }: Props) {
+function GroupDetailView({
+  group,
+  allNodes,
+  selectedNodeId,
+  getNodeStatus,
+  onSelectNode,
+  onClose,
+}: {
+  group: KanjiGroup;
+  allNodes: KanjiNodeData[];
+  selectedNodeId: string | null;
+  getNodeStatus: (node: KanjiNodeData) => NodeStatus;
+  onSelectNode: (node: KanjiNodeData) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState('');
+
+  useEffect(() => {
+    setQuery('');
+  }, [group.id]);
+
+  const filteredMembers = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return group.members;
+
+    return group.members.filter(node =>
+      node.kanji.includes(q) ||
+      node.name.toLowerCase().includes(q) ||
+      node.meanings.some(meaning => meaning.toLowerCase().includes(q)) ||
+      node.readings.onyomi.some(reading => reading.toLowerCase().includes(q)) ||
+      node.readings.kunyomi.some(reading => reading.toLowerCase().includes(q)),
+    );
+  }, [group.members, query]);
+
+  const stats = useMemo(() => {
+    const statuses = group.members.map(getNodeStatus);
+    return {
+      mastered: statuses.filter(status => status === 'MASTERED').length,
+      available: statuses.filter(status => status === 'AVAILABLE').length,
+    };
+  }, [group.members, getNodeStatus]);
+
+  const memberMap = useMemo(
+    () => new Map(allNodes.map(node => [node.id, node])),
+    [allNodes],
+  );
+
+  return (
+    <section className="absolute inset-3 sm:inset-5 z-30 flex flex-col rounded-3xl border border-cyan-400/30 bg-rpg-panel/98 shadow-[0_20px_60px_rgba(0,0,0,0.55)] overflow-hidden">
+      <header className="shrink-0 p-4 sm:p-5 border-b border-slate-800 bg-slate-950/80 backdrop-blur-md">
+        <div className="flex items-start gap-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="shrink-0 p-2.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-300 hover:text-white hover:border-cyan-400 transition-colors"
+            title="Wróć do mapy grup"
+          >
+            <ArrowLeft className="w-5 h-5" />
+          </button>
+
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              {group.representative && (
+                <span className="text-3xl font-serif text-cyan-200 leading-none">
+                  {group.representative}
+                </span>
+              )}
+              <div className="min-w-0">
+                <h2 className="text-lg sm:text-xl font-extrabold text-white truncate">
+                  {group.label}
+                </h2>
+                <p className="text-xs text-slate-400">
+                  {group.description}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={onClose}
+            className="shrink-0 p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            title="Zamknij"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="mt-4 flex flex-col sm:flex-row gap-2 sm:items-center">
+          <div className="flex items-center gap-2 text-xs text-slate-300">
+            <span className="px-2 py-1 rounded-lg bg-slate-900 border border-slate-700">
+              {group.members.length} kanji
+            </span>
+            <span className="px-2 py-1 rounded-lg bg-amber-950/60 border border-amber-500/20 text-amber-300">
+              {stats.mastered} opanowanych
+            </span>
+            <span className="px-2 py-1 rounded-lg bg-cyan-950/60 border border-cyan-500/20 text-cyan-300">
+              {stats.available} dostępnych
+            </span>
+          </div>
+
+          <div className="relative sm:ml-auto w-full sm:w-72">
+            <Search className="w-4 h-4 text-cyan-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              value={query}
+              onChange={event => setQuery(event.target.value)}
+              placeholder="Szukaj w tej grupie…"
+              className="w-full rounded-xl bg-slate-900 border border-slate-700 focus:border-cyan-400 pl-9 pr-9 py-2 text-xs text-white placeholder-slate-500 outline-none"
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-white"
+                title="Wyczyść wyszukiwanie"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        </div>
+      </header>
+
+      <div className="flex-1 overflow-y-auto p-3 sm:p-5">
+        {filteredMembers.length === 0 ? (
+          <div className="h-full min-h-40 flex items-center justify-center text-sm text-slate-500">
+            Brak kanji pasujących do wyszukiwania.
+          </div>
+        ) : (
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-2.5 sm:gap-3">
+            {filteredMembers.map(member => {
+              const status = getNodeStatus(member);
+              const parents = member.parents
+                .map(parentId => memberMap.get(parentId))
+                .filter((node): node is KanjiNodeData => node !== undefined)
+                .slice(0, 4);
+
+              const selected = member.id === selectedNodeId;
+
+              return (
+                <button
+                  type="button"
+                  key={member.id}
+                  onClick={() => onSelectNode(member)}
+                  className={[
+                    'min-h-[136px] text-left rounded-2xl border-2 p-3',
+                    'bg-slate-950/80 transition-all focus:outline-none',
+                    'hover:border-cyan-400/70 hover:-translate-y-0.5',
+                    selected ? 'border-cyan-300 ring-2 ring-cyan-300/50' : '',
+                    status === 'MASTERED'
+                      ? 'border-amber-500/40'
+                      : status === 'AVAILABLE'
+                        ? 'border-cyan-500/50'
+                        : 'border-slate-800',
+                  ].join(' ')}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-4xl font-serif font-bold text-cyan-200 leading-none">
+                      {member.kanji}
+                    </span>
+                    <span className={[
+                      'shrink-0 px-1.5 py-0.5 rounded-md text-[9px] font-bold',
+                      status === 'MASTERED'
+                        ? 'bg-amber-500 text-slate-950'
+                        : status === 'AVAILABLE'
+                          ? 'bg-cyan-400 text-slate-950'
+                          : 'bg-slate-800 text-slate-500',
+                    ].join(' ')}>
+                      {status}
+                    </span>
+                  </div>
+
+                  <div className="mt-2 min-w-0">
+                    <div className="text-xs font-bold text-white truncate">
+                      {member.name}
+                    </div>
+                    <div className="text-[10px] text-slate-400 h-8 overflow-hidden">
+                      {member.meanings.slice(0, 2).join(' · ')}
+                    </div>
+                  </div>
+
+                  <div className="mt-2 pt-2 border-t border-slate-800 min-h-6">
+                    {parents.length > 0 ? (
+                      <div className="flex items-center gap-1 min-w-0">
+                        <span className="text-[9px] text-slate-500 shrink-0">Wymaga:</span>
+                        <div className="flex items-center gap-0.5 min-w-0 overflow-hidden">
+                          {parents.map(parent => (
+                            <span
+                              key={parent.id}
+                              title={parent.name}
+                              className="w-5 h-5 shrink-0 rounded bg-slate-900 border border-slate-700 flex items-center justify-center text-[11px] font-serif text-amber-200"
+                            >
+                              {parent.kanji}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-[9px] text-slate-500">Podstawowy element</span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function Inner({
+  nodes,
+  allNodes,
+  selectedNodeId,
+  getNodeStatus,
+  onSelectNode,
+}: Props) {
   const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
   const { setCenter } = useReactFlow();
-  const groups = useMemo(() => buildGroups(kanjiNodes), [kanjiNodes]);
-  const layout = useMemo(() => makeLayout(groups, kanjiNodes), [groups, kanjiNodes]);
-  const expandedGroup = groups.find(g => g.id === expandedGroupId) ?? null;
-  const internalLayout = useMemo(() => {
-    if (!expandedGroup) return null;
-    const graph = new dagre.graphlib.Graph();
-    graph.setDefaultEdgeLabel(() => ({}));
-    graph.setGraph({ rankdir: 'TB', nodesep: 35, ranksep: 70 });
-    const ids = new Set(expandedGroup.members.map(n => n.id));
-    for (const n of expandedGroup.members) graph.setNode(n.id, { width: 110, height: 120 });
-    const edges: { id: string; source: string; target: string }[] = [];
-    for (const n of expandedGroup.members) for (const p of n.parents) {
-      if (!ids.has(p)) continue;
-      graph.setEdge(p, n.id);
-      edges.push({ id: `local-${p}-${n.id}`, source: p, target: n.id });
-    }
-    dagre.layout(graph);
-    const positions = new Map<string, { x: number; y: number }>();
-    for (const n of expandedGroup.members) {
-      const p = graph.node(n.id);
-      if (p) positions.set(n.id, { x: p.x - 55, y: p.y - 60 });
-    }
-    return { positions, edges };
-  }, [expandedGroup]);
 
-  const nodes: Node[] = useMemo(
-    () => expandedGroup && internalLayout
-      ? expandedGroup.members.map(node => ({
-          id: node.id,
-          type: 'kanjiNode',
-          position: internalLayout.positions.get(node.id)!,
-          draggable: false,
-          data: { node, status: getNodeStatus(node), isSelected: node.id === selectedNodeId, onSelect: onSelectNode },
-        }))
-      : groups.map(group => ({
+  const groups = useMemo(() => buildGroups(allNodes), [allNodes]);
+  const visibleMemberIds = useMemo(
+    () => new Set(nodes.map(node => node.id)),
+    [nodes],
+  );
+
+  const relations = useMemo(
+    () => buildGroupRelations(groups, allNodes),
+    [groups, allNodes],
+  );
+
+  const displayedGroups = useMemo(() => {
+    if (visibleMemberIds.size >= allNodes.length) return groups;
+
+    const groupById = new Map(groups.map(group => [group.id, group]));
+    const visible = new Set(
+      groups
+        .filter(group => group.members.some(member => visibleMemberIds.has(member.id)))
+        .map(group => group.id),
+    );
+
+    // Add one dependency layer above the filtered groups so the user can still
+    // see what unlocks the current JLPT selection.
+    for (const relation of relations) {
+      if (visible.has(relation.target)) {
+        visible.add(relation.source);
+      }
+    }
+
+    return [...visible]
+      .map(id => groupById.get(id))
+      .filter((group): group is KanjiGroup => group !== undefined);
+  }, [groups, relations, visibleMemberIds, allNodes.length]);
+
+  const positions = useMemo(
+    () => makeLayout(displayedGroups, relations),
+    [displayedGroups, relations],
+  );
+
+  const expandedGroup = groups.find(group => group.id === expandedGroupId) ?? null;
+
+  useEffect(() => {
+    if (expandedGroupId && !expandedGroup) {
+      setExpandedGroupId(null);
+    }
+  }, [expandedGroupId, expandedGroup]);
+
+  useEffect(() => {
+    if (!expandedGroupId) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setExpandedGroupId(null);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [expandedGroupId]);
+
+  const graphNodes: Node[] = useMemo(
+    () => displayedGroups.map(group => ({
       id: group.id,
       type: 'kanjiGroup',
-      position: layout.positions.get(group.id)!,
+      position: positions.get(group.id) ?? { x: 0, y: 0 },
       draggable: false,
+      selectable: false,
       data: {
         group,
         getNodeStatus,
         onSelectNode,
-        selected: group.members.some(m => m.id === selectedNodeId),
-      },
+        onExpand: () => setExpandedGroupId(group.id),
+        selected: group.members.some(member => member.id === selectedNodeId),
+        visibleMemberIds,
+      } satisfies GroupNodeData,
     })),
-    [groups, layout, getNodeStatus, onSelectNode, selectedNodeId, expandedGroup, internalLayout],
+    [
+      displayedGroups,
+      positions,
+      getNodeStatus,
+      onSelectNode,
+      selectedNodeId,
+      visibleMemberIds,
+    ],
   );
 
-  const edges: Edge[] = useMemo(
-    () => expandedGroup && internalLayout
-      ? internalLayout.edges.map(edge => ({
-          id: edge.id,
-          source: edge.source,
-          target: edge.target,
-          style: { stroke: '#475569', strokeWidth: 1.8 },
-          markerEnd: { type: MarkerType.ArrowClosed, color: '#475569', width: 14, height: 14 },
-        }))
-      : layout.edges.map(edge => {
-      const source = layout.groupsById.get(edge.source)!;
-      const target = layout.groupsById.get(edge.target)!;
-      const sourceMastered = source.members.every(m => getNodeStatus(m) === 'MASTERED');
-      const targetAvailable = target.members.some(m => getNodeStatus(m) === 'AVAILABLE');
-      const color = sourceMastered ? '#f59e0b' : targetAvailable ? '#06b6d4' : '#475569';
+  const graphEdges: Edge[] = useMemo(
+    () => relations
+      .filter(relation =>
+        displayedGroups.some(group => group.id === relation.source) &&
+        displayedGroups.some(group => group.id === relation.target),
+      )
+      .map(relation => {
+        const opacity = relation.count >= 4 ? 0.95 : relation.count >= 2 ? 0.82 : 0.55;
+        const strokeWidth = Math.min(5.5, 1.75 + relation.count * 0.45);
 
-      return {
-        id: edge.id,
-        source: edge.source,
-        target: edge.target,
-        style: { stroke: color, strokeWidth: Math.min(4, 1.5 + edge.count * 0.5), opacity: 0.8 },
-        markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
-        label: edge.count > 1 ? `${edge.count} zależności` : undefined,
-        labelStyle: { fill: '#94a3b8', fontSize: 9 },
-        labelBgStyle: { fill: '#0f172a', fillOpacity: 0.9 },
-      };
-    }),
-    [layout, getNodeStatus, expandedGroup, internalLayout],
+        return {
+          id: relation.id,
+          source: relation.source,
+          target: relation.target,
+          type: 'smoothstep',
+          animated: false,
+          style: {
+            stroke: '#06b6d4',
+            strokeWidth,
+            opacity,
+          },
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            color: '#06b6d4',
+            width: 15,
+            height: 15,
+          },
+        };
+      }),
+    [relations, displayedGroups],
   );
 
   useEffect(() => {
-    if (!selectedNodeId) return;
-    if (expandedGroup) {
-      const p = internalLayout?.positions.get(selectedNodeId);
-      if (p) setCenter(p.x + 55, p.y + 60, { zoom: 1.2, duration: 400 });
-      return;
-    }
+    if (!selectedNodeId || expandedGroupId) return;
 
-    const group = groups.find(g => g.members.some(m => m.id === selectedNodeId));
-    const p = group ? layout.positions.get(group.id) : undefined;
-    if (p) setCenter(p.x + 95, p.y + 77.5, { zoom: 1, duration: 400 });
-  }, [selectedNodeId, groups, layout, expandedGroup, internalLayout, setCenter]);
+    const group = groups.find(candidate =>
+      candidate.members.some(member => member.id === selectedNodeId),
+    );
+
+    const position = group ? positions.get(group.id) : undefined;
+    if (!position) return;
+
+    setCenter(
+      position.x + GROUP_WIDTH / 2,
+      position.y + GROUP_HEIGHT / 2,
+      { zoom: 0.85, duration: 350 },
+    );
+  }, [selectedNodeId, expandedGroupId, groups, positions, setCenter]);
 
   return (
-    <div className="w-full h-full bg-rpg-bg relative overflow-hidden">
-      {expandedGroup && (
-        <button
-          onClick={() => setExpandedGroupId(null)}
-          className="absolute z-20 top-4 left-4 px-4 py-2 rounded-xl bg-slate-950/95 border border-cyan-400/60 text-cyan-200 text-sm font-semibold shadow-xl hover:bg-slate-900"
+    <div className="relative w-full h-full bg-rpg-bg overflow-hidden">
+      {expandedGroup ? (
+        <GroupDetailView
+          group={expandedGroup}
+          allNodes={allNodes}
+          selectedNodeId={selectedNodeId}
+          getNodeStatus={getNodeStatus}
+          onSelectNode={onSelectNode}
+          onClose={() => setExpandedGroupId(null)}
+        />
+      ) : (
+        <ReactFlow
+          nodes={graphNodes}
+          edges={graphEdges}
+          nodeTypes={nodeTypes}
+          nodesDraggable={false}
+          nodesConnectable={false}
+          elementsSelectable={false}
+          onlyRenderVisibleElements
+          fitView
+          fitViewOptions={{ padding: 0.25, minZoom: 0.2, maxZoom: 0.9 }}
+          minZoom={0.18}
+          maxZoom={1.6}
+          zoomOnDoubleClick={false}
+          preventScrolling
+          panOnScroll
+          panOnDrag
         >
-          ← Wróć do mapy grup
-        </button>
+          <Background color="#1e293b" gap={24} size={1.5} />
+          <Controls
+            showInteractive={false}
+            className="!bg-rpg-panel !border-rpg-border !rounded-xl overflow-hidden shadow-xl"
+          />
+          <MiniMap
+            pannable
+            zoomable
+            nodeColor={node => {
+              const group = (node.data as GroupNodeData | undefined)?.group;
+              if (!group) return '#334155';
+
+              const statuses = group.members.map(getNodeStatus);
+              return statuses.every(status => status === 'MASTERED')
+                ? '#f59e0b'
+                : statuses.some(status => status === 'AVAILABLE')
+                  ? '#06b6d4'
+                  : '#334155';
+            }}
+            maskColor="rgba(9, 13, 22, 0.85)"
+            className="!bg-rpg-panel !border-rpg-border !rounded-xl overflow-hidden shadow-xl hidden md:block"
+          />
+        </ReactFlow>
       )}
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        nodeTypes={expandedGroup ? { kanjiNode: KanjiNodeComponent } : nodeTypes}
-        nodesDraggable={false}
-        nodesConnectable={false}
-        elementsSelectable={false}
-        onlyRenderVisibleElements
-        fitView
-        fitViewOptions={{ padding: 0.2 }}
-        minZoom={expandedGroup ? 0.35 : 0.2}
-        maxZoom={2}
-        zoomOnDoubleClick={false}
-        preventScrolling
-      >
-        <Background color="#1e293b" gap={24} size={1.5} />
-        <Controls />
-        {!expandedGroup && <MiniMap
-          pannable
-          zoomable
-          nodeColor={n => {
-            const group = (n.data as { group?: KanjiGroup })?.group;
-            if (!group) return '#334155';
-            const statuses = group.members.map(getNodeStatus);
-            return statuses.every(s => s === 'MASTERED')
-              ? '#f59e0b'
-              : statuses.some(s => s === 'AVAILABLE') ? '#06b6d4' : '#334155';
-          }}
-          maskColor="rgba(9, 13, 22, 0.85)"
-          className="!bg-rpg-panel !border-rpg-border !rounded-xl overflow-hidden shadow-xl hidden sm:block"
-        />}
-      </ReactFlow>
     </div>
   );
 }
 
 export const SkillTreeGraph: React.FC<Props> = props => (
-  <ReactFlowProvider><Inner {...props} /></ReactFlowProvider>
+  <ReactFlowProvider>
+    <Inner {...props} />
+  </ReactFlowProvider>
 );
