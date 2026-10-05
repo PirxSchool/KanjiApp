@@ -269,7 +269,7 @@ function Inner({ nodes: kanjiNodes, selectedNodeId, getNodeStatus, onSelectNode 
         selected: group.members.some(m => m.id === selectedNodeId),
       },
     })),
-    [groups, layout, getNodeStatus, onSelectNode, selectedNodeId],
+    [groups, layout, getNodeStatus, onSelectNode, selectedNodeId, expandedGroup, internalLayout],
   );
 
   const edges: Edge[] = useMemo(
