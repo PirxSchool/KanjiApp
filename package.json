@@ -13,7 +13,6 @@
   "dependencies": {
     "@xyflow/react": "^12.12.0",
     "canvas-confetti": "^1.9.4",
-    "dagre": "^0.8.5",
     "lucide-react": "^1.50.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
@@ -21,7 +20,6 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@types/canvas-confetti": "^1.9.0",
-    "@types/dagre": "^0.7.54",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
