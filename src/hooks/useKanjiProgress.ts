@@ -28,44 +28,55 @@ export function useKanjiProgress(allNodes: KanjiNodeData[]) {
   }, [progress]);
 
   // Set = O(1) zamiast Array.includes przy 1000+ węzłach
-  const mastered = useMemo(() => new Set(progress.masteredIds), [progress.masteredIds]);
+  const masteredSet = useMemo(() => new Set(progress.masteredIds), [progress.masteredIds]);
   const nodeMap = useMemo(() => new Map(allNodes.map(n => [n.id, n])), [allNodes]);
 
   const getNodeStatus = useCallback((node: KanjiNodeData): NodeStatus => {
-    if (mastered.has(node.id)) return 'MASTERED';
+    if (masteredSet.has(node.id)) return 'MASTERED';
     // nieistniejący rodzic nie może blokować węzła na zawsze
-    const ok = node.parents.every(p => mastered.has(p) || !nodeMap.has(p));
+    const ok = node.parents.every(p => masteredSet.has(p) || !nodeMap.has(p));
     return ok ? 'AVAILABLE' : 'LOCKED';
-  }, [mastered, nodeMap]);
+  }, [masteredSet, nodeMap]);
 
   const toggleMastery = useCallback((nodeId: string) => {
     const node = nodeMap.get(nodeId);
     if (!node) return;
 
-    const was = mastered.has(nodeId);
-    const gained = was ? 0 : node.parents.length > 0 ? 100 : 50;
-    const xp = Math.max(0, progress.xp + gained);
-    const level = Math.floor(xp / 200) + 1;
+    const wasMastered = masteredSet.has(nodeId);
+    const xpDelta = node.parents.length > 0 ? 100 : 50;
 
-    const now = new Date();
-    const last = progress.lastStudyDate?.slice(0, 10);
-    const streak = last === day(now) ? progress.streak
-      : last === day(new Date(now.getTime() - 864e5)) ? progress.streak + 1 : 1;
-
-    // efekty uboczne POZA updaterem (StrictMode wywoływał je podwójnie)
-    if (!was) {
+    // Efekty uboczne POZA updaterem (StrictMode wywoływał je podwójnie)
+    if (!wasMastered) {
       soundFx.playUnlock();
       confetti({ particleCount: 70, spread: 60, origin: { y: 0.8 },
         colors: ['#06b6d4', '#f59e0b', '#10b981', '#a855f7'] });
-      if (level > progress.level) soundFx.playLevelUp();
     }
 
-    setProgress({
-      ...progress,
-      masteredIds: was ? progress.masteredIds.filter(id => id !== nodeId) : [...progress.masteredIds, nodeId],
-      xp, level, streak, lastStudyDate: now.toISOString(),
+    setProgress(prev => {
+      const newXp = Math.max(0, prev.xp + (wasMastered ? -xpDelta : xpDelta));
+      const newLevel = Math.floor(newXp / 200) + 1;
+
+      const now = new Date();
+      const last = prev.lastStudyDate?.slice(0, 10);
+      const streak = last === day(now) ? prev.streak
+        : last === day(new Date(now.getTime() - 864e5)) ? prev.streak + 1 : 1;
+
+      if (!wasMastered && newLevel > prev.level) {
+        soundFx.playLevelUp();
+      }
+
+      return {
+        ...prev,
+        masteredIds: wasMastered
+          ? prev.masteredIds.filter(id => id !== nodeId)
+          : [...prev.masteredIds, nodeId],
+        xp: newXp,
+        level: newLevel,
+        streak,
+        lastStudyDate: now.toISOString(),
+      };
     });
-  }, [progress, mastered, nodeMap]);
+  }, [masteredSet, nodeMap]);
 
   const resetProgress = useCallback(() => {
     if (window.confirm('Are you sure you want to reset all Kanji progress?')) {
@@ -74,5 +85,5 @@ export function useKanjiProgress(allNodes: KanjiNodeData[]) {
     }
   }, []);
 
-  return { progress, getNodeStatus, toggleMastery, resetProgress };
+  return { progress, masteredSet, getNodeStatus, toggleMastery, resetProgress };
 }

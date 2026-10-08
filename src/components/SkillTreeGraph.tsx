@@ -1,4 +1,4 @@
-import React, { memo, useEffect, useMemo, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import type { Edge, Node } from '@xyflow/react';
 import {
   Background,
@@ -646,6 +646,10 @@ function Inner({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [expandedGroupId]);
 
+  const handleExpand = useCallback((groupId: string) => {
+    setExpandedGroupId(groupId);
+  }, []);
+
   const graphNodes: Node[] = useMemo(
     () => displayedGroups.map(group => ({
       id: group.id,
@@ -657,7 +661,7 @@ function Inner({
         group,
         getNodeStatus,
         onSelectNode,
-        onExpand: () => setExpandedGroupId(group.id),
+        onExpand: () => handleExpand(group.id),
         selected: group.members.some(member => member.id === selectedNodeId),
         visibleMemberIds,
       } satisfies GroupNodeData,
@@ -669,6 +673,7 @@ function Inner({
       onSelectNode,
       selectedNodeId,
       visibleMemberIds,
+      handleExpand,
     ],
   );
 

@@ -28,7 +28,6 @@ export const KanjiDetailDrawer: React.FC<KanjiDetailDrawerProps> = ({
     .filter((n): n is KanjiNodeData => n !== undefined);
 
   const handleAudioPlay = (text: string) => {
-    soundFx.playTap();
     soundFx.speakJapanese(text);
   };
 

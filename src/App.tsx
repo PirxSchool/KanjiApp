@@ -15,7 +15,7 @@ export function App() {
   const [activeDrawerNode, setActiveDrawerNode] = useState<KanjiNodeData | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string>('k_明');
 
-  const { progress, getNodeStatus, toggleMastery, resetProgress } = useKanjiProgress(nodesData);
+  const { progress, masteredSet, getNodeStatus, toggleMastery, resetProgress } = useKanjiProgress(nodesData);
 
   // Filter nodes by selected JLPT level
   const filteredNodes = useMemo(() => {
@@ -23,24 +23,16 @@ export function App() {
     return nodesData.filter(node => node.jlpt === selectedJlpt);
   }, [nodesData, selectedJlpt]);
 
-  // Mastered Kanji Count
-  const masteredCount = useMemo(() => {
-    return nodesData.filter(node => progress.masteredIds.includes(node.id)).length;
-  }, [nodesData, progress.masteredIds]);
+  // Mastered Kanji Count — O(1) via Set.size instead of O(n*m) via Array.includes
+  const masteredCount = masteredSet.size;
 
   // Active Focused Node for Local Focus View
   const focusedNode = useMemo(() => {
     return nodesData.find(n => n.id === focusedNodeId) || nodesData[0];
   }, [nodesData, focusedNodeId]);
 
-  // Handle node selection from graph or search
+  // Handle node selection from graph, search, or parent click in drawer
   const handleSelectNode = (node: KanjiNodeData) => {
-    setFocusedNodeId(node.id);
-    setActiveDrawerNode(node);
-  };
-
-  // Jump directly to a parent component when clicked inside drawer
-  const handleSelectParentNode = (node: KanjiNodeData) => {
     setFocusedNodeId(node.id);
     setActiveDrawerNode(node);
   };
@@ -98,7 +90,7 @@ export function App() {
           allNodes={nodesData}
           onClose={() => setActiveDrawerNode(null)}
           onToggleMastery={toggleMastery}
-          onSelectParentNode={handleSelectParentNode}
+          onSelectParentNode={handleSelectNode}
         />
       )}
     </div>
@@ -106,3 +98,4 @@ export function App() {
 }
 
 export default App;
+

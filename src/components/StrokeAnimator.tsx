@@ -87,14 +87,6 @@ export const StrokeAnimator: React.FC<StrokeAnimatorProps> = ({
           <RotateCcw className="w-4 h-4" />
         </button>
       </div>
-
-      <style>{`
-        @keyframes dash {
-          to {
-            stroke-dashoffset: 0;
-          }
-        }
-      `}</style>
     </div>
   );
 };
