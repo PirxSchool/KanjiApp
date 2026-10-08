@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Edge, Node } from '@xyflow/react';
 import {
   Background,
@@ -10,7 +10,6 @@ import {
   useReactFlow,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import dagre from 'dagre';
 import { ArrowLeft, Layers, Search, X } from 'lucide-react';
 import type { KanjiNodeData, NodeStatus } from '../types/kanji';
 
@@ -38,6 +37,7 @@ type GroupNodeData = {
   onExpand: () => void;
   selected: boolean;
   visibleMemberIds: Set<string>;
+  unlocked: boolean;
 };
 
 type GroupRelation = {
@@ -50,10 +50,20 @@ type GroupRelation = {
 const MIN_COMPONENT_USAGE = 8;
 const GROUP_WIDTH = 230;
 const GROUP_HEIGHT = 168;
+const GROUP_COLUMN_X = 285;
+const GROUP_LAYER_Y = 230;
 const MAX_PREVIEW = 6;
 const MAX_INCOMING_EDGES = 2;
 const SECONDARY_EDGE_MIN_COUNT = 3;
 const SECONDARY_EDGE_RATIO = 0.5;
+
+const JLPT_ORDER = new Map([
+  ['N5', 0],
+  ['N4', 1],
+  ['N3', 2],
+  ['N2', 3],
+  ['N1', 4],
+]);
 
 function buildGroups(allNodes: KanjiNodeData[]) {
   const byId = new Map(allNodes.map(node => [node.id, node]));
@@ -114,8 +124,6 @@ function buildGroups(allNodes: KanjiNodeData[]) {
     };
   });
 
-  // Keep small component families out of the main map only when they contain a
-  // single member. The data still remains accessible through the foundation node.
   const foundationGroups = new Map(
     groups
       .filter(group => group.key.startsWith('foundation_'))
@@ -198,56 +206,82 @@ function buildGroupRelations(
       selected.push(secondary);
     }
 
-    // Never show a third incoming path. The map is meant to explain the main
-    // learning route, not reproduce the complete dependency database.
     if (selected.length > 0 && list.length > MAX_INCOMING_EDGES) {
       // Intentionally keep only the strongest two candidates above.
     }
   }
 
-  // The selection above is target-local, but adding a relation twice is harmless;
-  // use a final map so each edge remains unique.
   return [...new Map(selected.map(relation => [relation.id, relation])).values()];
 }
 
-function makeLayout(groups: KanjiGroup[], relations: GroupRelation[]) {
-  const graph = new dagre.graphlib.Graph();
-  graph.setDefaultEdgeLabel(() => ({}));
-  graph.setGraph({
-    rankdir: 'TB',
-    ranksep: 125,
-    nodesep: 75,
-    edgesep: 35,
-    marginx: 30,
-    marginy: 30,
-  });
+function buildUnlockDepths(allNodes: KanjiNodeData[]) {
+  const byId = new Map(allNodes.map(node => [node.id, node]));
+  const depths = new Map<string, number>();
+  const visiting = new Set<string>();
 
-  for (const group of groups) {
-    graph.setNode(group.id, {
-      width: GROUP_WIDTH,
-      height: GROUP_HEIGHT,
-    });
+  const depthOf = (node: KanjiNodeData): number => {
+    const saved = depths.get(node.id);
+    if (saved !== undefined) return saved;
+
+    if (visiting.has(node.id)) return 0;
+    visiting.add(node.id);
+
+    const parentDepths = node.parents
+      .map(parentId => byId.get(parentId))
+      .filter((parent): parent is KanjiNodeData => parent !== undefined)
+      .map(parent => depthOf(parent));
+
+    const depth = parentDepths.length > 0 ? Math.max(...parentDepths) + 1 : 0;
+    visiting.delete(node.id);
+    depths.set(node.id, depth);
+    return depth;
+  };
+
+  for (const node of allNodes) {
+    depthOf(node);
   }
 
-  const groupIds = new Set(groups.map(group => group.id));
+  return depths;
+}
 
-  for (const relation of relations) {
-    if (groupIds.has(relation.source) && groupIds.has(relation.target)) {
-      graph.setEdge(relation.source, relation.target, { minlen: 1 });
-    }
+function getGroupUnlockDepth(group: KanjiGroup, unlockDepths: Map<string, number>) {
+  return Math.min(...group.members.map(member => unlockDepths.get(member.id) ?? 0));
+}
+
+function sortGroupsByLearningOrder(groups: KanjiGroup[], unlockDepths: Map<string, number>) {
+  return [...groups].sort((a, b) =>
+    getGroupUnlockDepth(a, unlockDepths) - getGroupUnlockDepth(b, unlockDepths) ||
+    (JLPT_ORDER.get(a.members[0]?.jlpt) ?? 99) - (JLPT_ORDER.get(b.members[0]?.jlpt) ?? 99) ||
+    a.members[0]?.strokeCount - b.members[0]?.strokeCount ||
+    a.label.localeCompare(b.label, 'pl'),
+  );
+}
+
+function makeLayout(groups: KanjiGroup[], unlockDepths: Map<string, number>) {
+  const layers = new Map<number, KanjiGroup[]>();
+
+  for (const group of sortGroupsByLearningOrder(groups, unlockDepths)) {
+    const depth = getGroupUnlockDepth(group, unlockDepths);
+    const layer = layers.get(depth) ?? [];
+    layer.push(group);
+    layers.set(depth, layer);
   }
-
-  dagre.layout(graph);
 
   const positions = new Map<string, { x: number; y: number }>();
+  const orderedDepths = [...layers.keys()].sort((a, b) => a - b);
 
-  for (const group of groups) {
-    const position = graph.node(group.id);
-    positions.set(group.id, {
-      x: position.x - GROUP_WIDTH / 2,
-      y: position.y - GROUP_HEIGHT / 2,
+  orderedDepths.forEach((depth, layerIndex) => {
+    const layer = layers.get(depth) ?? [];
+    const totalWidth = (layer.length - 1) * GROUP_COLUMN_X;
+    const stagger = layer.length > 1 && layerIndex % 2 === 1 ? GROUP_COLUMN_X * 0.18 : 0;
+
+    layer.forEach((group, index) => {
+      positions.set(group.id, {
+        x: index * GROUP_COLUMN_X - totalWidth / 2 + stagger,
+        y: layerIndex * GROUP_LAYER_Y,
+      });
     });
-  }
+  });
 
   return positions;
 }
@@ -260,14 +294,16 @@ const GroupNode = memo(({ data }: { data: GroupNodeData }) => {
     onExpand,
     selected,
     visibleMemberIds,
+    unlocked,
   } = data;
 
   const statuses = group.members.map(getNodeStatus);
   const mastered = statuses.filter(status => status === 'MASTERED').length;
   const available = statuses.filter(status => status === 'AVAILABLE').length;
   const visibleMembers = group.members.filter(member => visibleMemberIds.has(member.id));
-  const supportOnly = visibleMemberIds.size > 0 && visibleMembers.length === 0;
-  const previewMembers = [...visibleMembers, ...group.members.filter(member => !visibleMemberIds.has(member.id))]
+  const unlockedMembers = group.members.filter(member => getNodeStatus(member) !== 'LOCKED');
+  const previewMembers = [...visibleMembers, ...unlockedMembers, ...group.members]
+    .filter((member, index, members) => members.findIndex(candidate => candidate.id === member.id) === index)
     .slice(0, MAX_PREVIEW);
 
   const borderClass = mastered === group.members.length
@@ -291,10 +327,10 @@ const GroupNode = memo(({ data }: { data: GroupNodeData }) => {
         }
       }}
       className={[
-        'w-[230px] h-[168px] box-border rounded-2xl border-2 bg-slate-950/95 p-3',
+        'nodrag nopan w-[230px] h-[168px] box-border rounded-2xl border-2 bg-slate-950/95 p-3',
         'cursor-pointer overflow-hidden select-none transition-all',
         borderClass,
-        supportOnly ? 'opacity-70' : '',
+        unlocked ? 'animate-groupUnlock' : '',
         selected ? 'ring-4 ring-cyan-300/80 ring-offset-2 ring-offset-slate-950' : '',
       ].join(' ')}
     >
@@ -305,7 +341,7 @@ const GroupNode = memo(({ data }: { data: GroupNodeData }) => {
 
         <div className="min-w-0 flex-1 pt-0.5">
           <div className="text-[9px] uppercase tracking-wider text-cyan-400/70 font-bold">
-            {supportOnly ? 'Wymagany komponent' : 'Grupa komponentów'}
+            {unlocked ? 'Nowa grupa' : 'Grupa komponentów'}
           </div>
           <div className="text-sm leading-5 font-bold text-white truncate">
             {group.label}
@@ -330,7 +366,7 @@ const GroupNode = memo(({ data }: { data: GroupNodeData }) => {
                 onSelectNode(member);
               }}
               className={[
-                'w-7 h-7 rounded-lg border text-base font-serif',
+                'nodrag nopan w-7 h-7 rounded-lg border text-base font-serif',
                 'transition-transform hover:scale-110 focus:outline-none focus:ring-2 focus:ring-cyan-300',
                 status === 'MASTERED'
                   ? 'bg-amber-950 border-amber-500 text-amber-200'
@@ -584,9 +620,12 @@ function Inner({
   onSelectNode,
 }: Props) {
   const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
+  const [unlockedGroupIds, setUnlockedGroupIds] = useState<Set<string>>(() => new Set());
+  const previousGroupIdsRef = useRef<Set<string> | null>(null);
   const { setCenter } = useReactFlow();
 
   const groups = useMemo(() => buildGroups(allNodes), [allNodes]);
+  const unlockDepths = useMemo(() => buildUnlockDepths(allNodes), [allNodes]);
   const visibleMemberIds = useMemo(
     () => new Set(nodes.map(node => node.id)),
     [nodes],
@@ -598,34 +637,50 @@ function Inner({
   );
 
   const displayedGroups = useMemo(() => {
-    if (visibleMemberIds.size >= allNodes.length) return groups;
+    const filteredGroups = groups.filter(group => {
+      const visibleMembers = group.members.filter(member => visibleMemberIds.has(member.id));
+      return visibleMembers.some(member => getNodeStatus(member) !== 'LOCKED');
+    });
 
-    const groupById = new Map(groups.map(group => [group.id, group]));
-    const visible = new Set(
-      groups
-        .filter(group => group.members.some(member => visibleMemberIds.has(member.id)))
-        .map(group => group.id),
-    );
+    return sortGroupsByLearningOrder(filteredGroups, unlockDepths);
+  }, [groups, visibleMemberIds, getNodeStatus, unlockDepths]);
 
-    // Add one dependency layer above the filtered groups so the user can still
-    // see what unlocks the current JLPT selection.
-    for (const relation of relations) {
-      if (visible.has(relation.target)) {
-        visible.add(relation.source);
-      }
-    }
-
-    return [...visible]
-      .map(id => groupById.get(id))
-      .filter((group): group is KanjiGroup => group !== undefined);
-  }, [groups, relations, visibleMemberIds, allNodes.length]);
-
-  const positions = useMemo(
-    () => makeLayout(displayedGroups, relations),
-    [displayedGroups, relations],
+  const displayedGroupIds = useMemo(
+    () => new Set(displayedGroups.map(group => group.id)),
+    [displayedGroups],
   );
 
-  const expandedGroup = groups.find(group => group.id === expandedGroupId) ?? null;
+  useEffect(() => {
+    const previousGroupIds = previousGroupIdsRef.current;
+    previousGroupIdsRef.current = displayedGroupIds;
+
+    if (!previousGroupIds) return;
+
+    const newlyUnlockedIds = displayedGroups
+      .filter(group => !previousGroupIds.has(group.id))
+      .map(group => group.id);
+
+    if (newlyUnlockedIds.length === 0) return;
+
+    setUnlockedGroupIds(prev => new Set([...prev, ...newlyUnlockedIds]));
+
+    const timeout = window.setTimeout(() => {
+      setUnlockedGroupIds(prev => {
+        const next = new Set(prev);
+        newlyUnlockedIds.forEach(id => next.delete(id));
+        return next;
+      });
+    }, 1800);
+
+    return () => window.clearTimeout(timeout);
+  }, [displayedGroups, displayedGroupIds]);
+
+  const positions = useMemo(
+    () => makeLayout(displayedGroups, unlockDepths),
+    [displayedGroups, unlockDepths],
+  );
+
+  const expandedGroup = displayedGroups.find(group => group.id === expandedGroupId) ?? null;
 
   useEffect(() => {
     if (expandedGroupId && !expandedGroup) {
@@ -664,6 +719,7 @@ function Inner({
         onExpand: () => handleExpand(group.id),
         selected: group.members.some(member => member.id === selectedNodeId),
         visibleMemberIds,
+        unlocked: unlockedGroupIds.has(group.id),
       } satisfies GroupNodeData,
     })),
     [
@@ -673,16 +729,14 @@ function Inner({
       onSelectNode,
       selectedNodeId,
       visibleMemberIds,
+      unlockedGroupIds,
       handleExpand,
     ],
   );
 
   const graphEdges: Edge[] = useMemo(
     () => relations
-      .filter(relation =>
-        displayedGroups.some(group => group.id === relation.source) &&
-        displayedGroups.some(group => group.id === relation.target),
-      )
+      .filter(relation => displayedGroupIds.has(relation.source) && displayedGroupIds.has(relation.target))
       .map(relation => {
         const opacity = relation.count >= 4 ? 0.95 : relation.count >= 2 ? 0.82 : 0.55;
         const strokeWidth = Math.min(5.5, 1.75 + relation.count * 0.45);
@@ -706,13 +760,13 @@ function Inner({
           },
         };
       }),
-    [relations, displayedGroups],
+    [relations, displayedGroupIds],
   );
 
   useEffect(() => {
     if (!selectedNodeId || expandedGroupId) return;
 
-    const group = groups.find(candidate =>
+    const group = displayedGroups.find(candidate =>
       candidate.members.some(member => member.id === selectedNodeId),
     );
 
@@ -724,7 +778,7 @@ function Inner({
       position.y + GROUP_HEIGHT / 2,
       { zoom: 0.85, duration: 350 },
     );
-  }, [selectedNodeId, expandedGroupId, groups, positions, setCenter]);
+  }, [selectedNodeId, expandedGroupId, displayedGroups, positions, setCenter]);
 
   return (
     <div className="relative w-full h-full bg-rpg-bg overflow-hidden">

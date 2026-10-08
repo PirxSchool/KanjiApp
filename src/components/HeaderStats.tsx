@@ -1,6 +1,7 @@
 import React from 'react';
 import type { UserProgress, JLPTLevel, ViewMode } from '../types/kanji';
 import { Trophy, Flame, Layers, Eye, RotateCcw, Filter } from 'lucide-react';
+import { getLevelInfo } from '../hooks/useKanjiProgress';
 
 interface HeaderStatsProps {
   progress: UserProgress;
@@ -23,8 +24,8 @@ export const HeaderStats: React.FC<HeaderStatsProps> = ({
   onToggleViewMode,
   onResetProgress,
 }) => {
-  const currentLevelXp = progress.xp % 200;
-  const xpPercentage = Math.min(100, Math.round((currentLevelXp / 200) * 100));
+  const levelInfo = getLevelInfo(progress.xp);
+  const xpPercentage = Math.min(100, Math.round((levelInfo.currentLevelXp / levelInfo.xpForNextLevel) * 100));
 
   const jlptLevels: (JLPTLevel | 'ALL')[] = ['ALL', 'N5', 'N4', 'N3', 'N2', 'N1'];
 
@@ -46,7 +47,7 @@ export const HeaderStats: React.FC<HeaderStatsProps> = ({
                 Kanji Quest
               </span>
               <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-500 text-slate-950 shadow-sm">
-                LVL {progress.level}
+                LVL {levelInfo.level}
               </span>
             </div>
 
@@ -59,7 +60,7 @@ export const HeaderStats: React.FC<HeaderStatsProps> = ({
                 />
               </div>
               <span className="text-[10px] font-bold text-amber-300 font-mono">
-                {currentLevelXp}/200 XP
+                {levelInfo.currentLevelXp}/{levelInfo.xpForNextLevel} XP
               </span>
             </div>
           </div>

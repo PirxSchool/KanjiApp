@@ -4,12 +4,36 @@ import { soundFx } from '../utils/audio';
 import confetti from 'canvas-confetti';
 
 const STORAGE_KEY = 'kanji_rpg_progress_v2';
+const BASE_LEVEL_XP = 180;
+const LEVEL_XP_GROWTH = 60;
 
 const INITIAL_PROGRESS: UserProgress = {
   masteredIds: [], xp: 0, level: 1, streak: 1, lastStudyDate: null,
 };
 
 const day = (d: Date) => d.toISOString().slice(0, 10);
+
+export function getXpRequiredForLevel(level: number) {
+  return BASE_LEVEL_XP + Math.max(0, level - 1) * LEVEL_XP_GROWTH;
+}
+
+export function getLevelInfo(totalXp: number) {
+  let level = 1;
+  let remainingXp = Math.max(0, totalXp);
+  let xpForNextLevel = getXpRequiredForLevel(level);
+
+  while (remainingXp >= xpForNextLevel) {
+    remainingXp -= xpForNextLevel;
+    level += 1;
+    xpForNextLevel = getXpRequiredForLevel(level);
+  }
+
+  return {
+    level,
+    currentLevelXp: remainingXp,
+    xpForNextLevel,
+  };
+}
 
 export function useKanjiProgress(allNodes: KanjiNodeData[]) {
   const [progress, setProgress] = useState<UserProgress>(() => {
@@ -54,7 +78,7 @@ export function useKanjiProgress(allNodes: KanjiNodeData[]) {
 
     setProgress(prev => {
       const newXp = Math.max(0, prev.xp + (wasMastered ? -xpDelta : xpDelta));
-      const newLevel = Math.floor(newXp / 200) + 1;
+      const newLevel = getLevelInfo(newXp).level;
 
       const now = new Date();
       const last = prev.lastStudyDate?.slice(0, 10);
